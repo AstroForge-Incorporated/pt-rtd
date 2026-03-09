@@ -32,8 +32,6 @@ pub enum ADCRes {
 #[derive(Clone, Copy)]
 pub enum RTDType {
     PT100 = 100,
-    PT200 = 200,
-    PT500 = 500,
     PT1000 = 1000,
 }
 
@@ -49,8 +47,6 @@ impl RTDCorrection {
         -1.61875985e-01,
         4.84112370e+00,
     ];
-    pub const PT200: Polynomial = [0_f32; 6]; // FIXME: Precalculate correctional polynomial for PT200
-    pub const PT500: Polynomial = [0_f32; 6]; // FIXME: Precalculate correctional polynomial for PT500
     pub const PT1000: Polynomial = [
         1.51892983e-15,
         -2.85842067e-12,
@@ -62,30 +58,52 @@ impl RTDCorrection {
 }
 type Polynomial = [f32; 6];
 
-const A: f32 = 3.9083e-3;
-const B: f32 = -5.7750e-7;
-const C: f32 = -4.1830e-12;
+#[derive(Debug, Clone, Copy)]
+pub struct Coefficients {
+    a: f32,
+    b: f32,
+    c: f32,
+}
+
+impl Coefficients {
+    /// From: https://prod-edam.honeywell.com/content/dam/honeywell-edam/sps/siot/en-us/products/sensors/temperature-sensors/rtd-sensors/hrts-series/documents/sps-siot-hrts-series-thin-film-platinum-rtds-datasheet-009081-1-en-ciid-154815.pdf#page=3
+    pub const HONEYWELL: Self = Self {
+        a: 3.81e-3,
+        b: -6.02e-7,
+        c: -6.0e-12,
+    };
+
+    pub const ITS90: Self = Self {
+        a: 3.9083e-3,
+        b: -5.7750e-7,
+        c: -4.1830e-12,
+    };
+
+    pub const IPTS69: Self = Self {
+        a: 3.90802e-03,
+        b: -5.80195e-07,
+        c: -4.27350e-12,
+    };
+}
 
 /// Calculate temperature of RTD from resistance value.
 ///
 /// Allowed temperature range: -200–850°C.
-pub fn calc_t(r: f32, r_0: RTDType) -> Result<f32, Error> {
-    let r_min = floorf(calc_r(-200_f32, r_0)?) as i32;
-    let r_max = floorf(calc_r(850_f32, r_0)?) as i32;
+pub fn calc_t(r: f32, r_0: RTDType, c: Coefficients) -> Result<f32, Error> {
+    let r_min = floorf(calc_r(-200_f32, r_0, c)?) as i32;
+    let r_max = floorf(calc_r(850_f32, r_0, c)?) as i32;
 
     // set correctional polynomial for t < 0°C
     let corr_poly: Result<[f32; 6], Error> = match r_0 {
         RTDType::PT100 => Ok(RTDCorrection::PT100),
-        RTDType::PT200 => Ok(RTDCorrection::PT200),
-        RTDType::PT500 => Ok(RTDCorrection::PT500),
         RTDType::PT1000 => Ok(RTDCorrection::PT1000),
     };
 
     // cast r_0 to f32 for calculation
     let r_0 = r_0 as i32 as f32;
-    let t = (-r_0 * A
-        + sqrtf(powf(r_0, 2_f32) * powf(A, 2_f32) - 4_f32 * r_0 * B * (r_0 - r)))
-        / (2_f32 * r_0 * B);
+    let t = (-r_0 * c.a
+        + sqrtf(powf(r_0, 2_f32) * powf(c.a, 2_f32) - 4_f32 * r_0 * c.b * (r_0 - r)))
+        / (2_f32 * r_0 * c.b);
 
     match corr_poly {
         Ok(poly) => {
@@ -105,14 +123,12 @@ pub fn calc_t(r: f32, r_0: RTDType) -> Result<f32, Error> {
 ///
 /// Allowed temperature range: -200–850°C. For temperatures below 0°C a small error (58.6uK max.
 /// over the full range) is introduced due to the use of polynomial approximation.
-pub fn calc_r(t: f32, r_0: RTDType) -> Result<f32, Error> {
+pub fn calc_r(t: f32, r_0: RTDType, c: Coefficients) -> Result<f32, Error> {
     let r_0 = r_0 as i32;
     match floorf(t) as i32 {
-        0..=850 => Ok(r_0 as f32 * (1_f32 + A * t + B * powf(t, 2_f32))),
-        -200..=-1 => {
-            Ok(r_0 as f32
-                * (1_f32 + A * t + B * powf(t, 2_f32) + C * (t - 100_f32) * powf(t, 3_f32)))
-        }
+        0..=850 => Ok(r_0 as f32 * (1_f32 + c.a * t + c.b * powf(t, 2_f32))),
+        -200..=-1 => Ok(r_0 as f32
+            * (1_f32 + c.a * t + c.b * powf(t, 2_f32) + c.c * (t - 100_f32) * powf(t, 3_f32))),
         _ => Err(Error::OutOfBounds),
     }
 }
@@ -150,7 +166,7 @@ mod tests {
     fn resistance_calculation() {
         let t = 0.0;
 
-        let r = calc_r(t, RTDType::PT100).unwrap();
+        let r = calc_r(t, RTDType::PT100, Coefficients::ITS90).unwrap();
         assert_eq!(r, 100_f32);
     }
 
@@ -158,7 +174,7 @@ mod tests {
     fn temperature_calculation() {
         let r = 100.0;
 
-        let t = calc_t(r, RTDType::PT100).unwrap();
+        let t = calc_t(r, RTDType::PT100, Coefficients::ITS90).unwrap();
         assert_eq!(t, 0_f32);
     }
 
@@ -166,33 +182,42 @@ mod tests {
     fn negative_temperature() {
         let r = 99.0;
 
-        let t = calc_t(r, RTDType::PT100).unwrap();
+        let t = calc_t(r, RTDType::PT100, Coefficients::ITS90).unwrap();
         dbg!(t);
         assert!(t < 0_f32);
     }
 
     #[test]
     fn test_range_for_all_types() {
-        test_range(18, 390, RTDType::PT100);
+        test_range(18, 390, RTDType::PT100, Coefficients::ITS90);
         // FIXME: Add tests for PT200 + PT500 once their polynomials are added
-        test_range(185, 3904, RTDType::PT1000);
+        test_range(185, 3904, RTDType::PT1000, Coefficients::ITS90);
     }
 
-    fn test_range(r_min: i32, r_max: i32, rtd_type: RTDType) {
+    fn test_range(r_min: i32, r_max: i32, rtd_type: RTDType, c: Coefficients) {
         // Calculate the first result
-        let mut prev_result = calc_t(r_min as f32, rtd_type).unwrap();
+        let mut prev_result = calc_t(r_min as f32, rtd_type, c).unwrap();
 
         for r in r_min + 1..r_max + 1 {
-            let res = calc_t(r as f32, rtd_type).unwrap();
-            dbg!(r, res, prev_result);
+            let res = calc_t(r as f32, rtd_type, c).unwrap();
+            println!("{}, {}, {}", r, res, prev_result);
 
             // Result needs to be larger than the previous result
             assert!(res > prev_result);
 
             // Check the conversion backwards (calculate resistance value from the temperature result)
             // Add 0.5 to the resistance to round the result instead of flooring when casting to i32
-            assert_eq!((calc_r(res, rtd_type).unwrap() + 0.5) as i32, r);
+            assert_eq!((calc_r(res, rtd_type, c).unwrap() + 0.5) as i32, r);
             prev_result = res;
         }
+    }
+
+    #[test]
+    // roughly -70 and 260 C
+    fn test_high_low() {
+        let t_high = calc_t(2050.0, RTDType::PT1000, Coefficients::HONEYWELL).unwrap();
+        println!("{t_high}");
+        let t_low = calc_t(750.0, RTDType::PT1000, Coefficients::HONEYWELL).unwrap();
+        println!("{t_low}");
     }
 }

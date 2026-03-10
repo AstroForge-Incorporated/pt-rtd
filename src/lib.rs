@@ -39,6 +39,7 @@ pub enum RTDType {
 struct RTDCorrection;
 
 impl RTDCorrection {
+    /// For IPTS69 standard
     pub const PT100: Polynomial = [
         1.51892983e-10,
         -2.85842067e-08,
@@ -47,6 +48,8 @@ impl RTDCorrection {
         -1.61875985e-01,
         4.84112370e+00,
     ];
+
+    /// For ITS90 standard
     pub const PT1000: Polynomial = [
         1.51892983e-15,
         -2.85842067e-12,
@@ -54,6 +57,16 @@ impl RTDCorrection {
         1.80282972e-05,
         -1.61875985e-02,
         4.84112370e+00,
+    ];
+
+    /// For Honeywell HRTS Series
+    pub const HONEYWELL: Polynomial = [
+        3.00981635e-15,
+        -7.16025438e-12,
+        -3.91897352e-09,
+        2.46895963e-05,
+        -2.40253053e-02,
+        7.40520839e+00,
     ];
 }
 type Polynomial = [f32; 6];
@@ -63,6 +76,7 @@ pub struct Coefficients {
     a: f32,
     b: f32,
     c: f32,
+    correction_poly: [f32; 6],
 }
 
 impl Coefficients {
@@ -71,18 +85,21 @@ impl Coefficients {
         a: 3.81e-3,
         b: -6.02e-7,
         c: -6.0e-12,
+        correction_poly: RTDCorrection::HONEYWELL,
     };
 
     pub const ITS90: Self = Self {
         a: 3.9083e-3,
         b: -5.7750e-7,
         c: -4.1830e-12,
+        correction_poly: RTDCorrection::PT1000,
     };
 
     pub const IPTS69: Self = Self {
         a: 3.90802e-03,
         b: -5.80195e-07,
         c: -4.27350e-12,
+        correction_poly: RTDCorrection::PT100,
     };
 }
 
@@ -93,29 +110,18 @@ pub fn calc_t(r: f32, r_0: RTDType, c: Coefficients) -> Result<f32, Error> {
     let r_min = floorf(calc_r(-200_f32, r_0, c)?) as i32;
     let r_max = floorf(calc_r(850_f32, r_0, c)?) as i32;
 
-    // set correctional polynomial for t < 0°C
-    let corr_poly: Result<[f32; 6], Error> = match r_0 {
-        RTDType::PT100 => Ok(RTDCorrection::PT100),
-        RTDType::PT1000 => Ok(RTDCorrection::PT1000),
-    };
-
     // cast r_0 to f32 for calculation
     let r_0 = r_0 as i32 as f32;
     let t = (-r_0 * c.a
         + sqrtf(powf(r_0, 2_f32) * powf(c.a, 2_f32) - 4_f32 * r_0 * c.b * (r_0 - r)))
         / (2_f32 * r_0 * c.b);
 
-    match corr_poly {
-        Ok(poly) => {
-            match (floorf(r) as i32, r_0 as i32) {
-                (r, r_0) if r_0 <= r && r <= r_max => Ok(t), // t >= 0°C
-                (r, r_0) if r_min <= r && r < r_0 => Ok(
-                    t + poly_correction(r as f32, poly), // t < 0°C, apply the correctional polynomial
-                ),
-                _ => Err(Error::OutOfBounds),
-            }
-        }
-        Err(_) => Err(Error::NonexistentType),
+    match (floorf(r) as i32, r_0 as i32) {
+        (r, r_0) if r_0 <= r && r <= r_max => Ok(t), // t >= 0°C
+        (r, r_0) if r_min <= r && r < r_0 => Ok(
+            t + poly_correction(r as f32, c.correction_poly), // t < 0°C, apply the correctional polynomial
+        ),
+        _ => Err(Error::OutOfBounds),
     }
 }
 

@@ -39,7 +39,6 @@ pub enum RTDType {
 struct RTDCorrection;
 
 impl RTDCorrection {
-    /// For IPTS69 standard
     pub const PT100: Polynomial = [
         1.51892983e-10,
         -2.85842067e-08,
@@ -49,7 +48,6 @@ impl RTDCorrection {
         4.84112370e+00,
     ];
 
-    /// For ITS90 standard
     pub const PT1000: Polynomial = [
         1.51892983e-15,
         -2.85842067e-12,
@@ -88,11 +86,21 @@ impl Coefficients {
         correction_poly: RTDCorrection::HONEYWELL,
     };
 
-    pub const ITS90: Self = Self {
+    // Note: IEC 60751 follows the ITS90 temperature scale
+    // Follows the IEC 60751 standard, but correction polynomial is specific to PT1000
+    pub const IEC60751_PT1000: Self = Self {
         a: 3.9083e-3,
         b: -5.7750e-7,
         c: -4.1830e-12,
         correction_poly: RTDCorrection::PT1000,
+    };
+
+    // Follows the IEC 60751 standard, but correction polynomail is specific to PT100
+    pub const IEC60751_PT100: Self = Self {
+        a: 3.9083e-3,
+        b: -5.7750e-7,
+        c: -4.1830e-12,
+        correction_poly: RTDCorrection::PT100,
     };
 
     pub const IPTS69: Self = Self {
@@ -172,7 +180,7 @@ mod tests {
     fn resistance_calculation() {
         let t = 0.0;
 
-        let r = calc_r(t, RTDType::PT100, Coefficients::ITS90).unwrap();
+        let r = calc_r(t, RTDType::PT100, Coefficients::IEC60751_PT100).unwrap();
         assert_eq!(r, 100_f32);
     }
 
@@ -180,7 +188,7 @@ mod tests {
     fn temperature_calculation() {
         let r = 100.0;
 
-        let t = calc_t(r, RTDType::PT100, Coefficients::ITS90).unwrap();
+        let t = calc_t(r, RTDType::PT100, Coefficients::IEC60751_PT100).unwrap();
         assert_eq!(t, 0_f32);
     }
 
@@ -188,16 +196,16 @@ mod tests {
     fn negative_temperature() {
         let r = 99.0;
 
-        let t = calc_t(r, RTDType::PT100, Coefficients::ITS90).unwrap();
+        let t = calc_t(r, RTDType::PT100, Coefficients::IEC60751_PT100).unwrap();
         dbg!(t);
         assert!(t < 0_f32);
     }
 
     #[test]
     fn test_range_for_all_types() {
-        test_range(18, 390, RTDType::PT100, Coefficients::ITS90);
+        test_range(18, 390, RTDType::PT100, Coefficients::IEC60751_PT100);
         // FIXME: Add tests for PT200 + PT500 once their polynomials are added
-        test_range(185, 3904, RTDType::PT1000, Coefficients::ITS90);
+        test_range(185, 3904, RTDType::PT1000, Coefficients::IEC60751_PT1000);
     }
 
     fn test_range(r_min: i32, r_max: i32, rtd_type: RTDType, c: Coefficients) {

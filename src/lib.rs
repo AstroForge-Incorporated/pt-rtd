@@ -35,39 +35,45 @@ pub enum RTDType {
     PT1000 = 1000,
 }
 
+// Note that PT100 and PT1000 RTDCorrection have been calculated using a temperature coefficient of resistance (TCR) of 3850 ppm/°C, which is the most common type of RTD.
+// Any other TCR will result in different A,B,C coefficients and therefore different correctional polynomials.
 #[non_exhaustive]
-struct RTDCorrection;
+#[derive(Debug, Clone, Copy)]
+pub enum RTDCorrection {
+    PT100,
+    PT1000,
+    HONEYWELL,
+}
 
 impl RTDCorrection {
-    /// For IPTS69 standard
-    pub const PT100: Polynomial = [
-        1.51892983e-10,
-        -2.85842067e-08,
-        -5.34227299e-06,
-        1.80282972e-03,
-        -1.61875985e-01,
-        4.84112370e+00,
-    ];
-
-    /// For ITS90 standard
-    pub const PT1000: Polynomial = [
-        1.51892983e-15,
-        -2.85842067e-12,
-        -5.34227299e-09,
-        1.80282972e-05,
-        -1.61875985e-02,
-        4.84112370e+00,
-    ];
-
-    /// For Honeywell HRTS Series
-    pub const HONEYWELL: Polynomial = [
-        3.00981635e-15,
-        -7.16025438e-12,
-        -3.91897352e-09,
-        2.46895963e-05,
-        -2.40253053e-02,
-        7.40520839e+00,
-    ];
+    pub fn get_poly(&self) -> Polynomial {
+        match self {
+            RTDCorrection::PT100 => [
+                1.51892983e-10,
+                -2.85842067e-08,
+                -5.34227299e-06,
+                1.80282972e-03,
+                -1.61875985e-01,
+                4.84112370e+00,
+            ],
+            RTDCorrection::PT1000 => [
+                1.51892983e-15,
+                -2.85842067e-12,
+                -5.34227299e-09,
+                1.80282972e-05,
+                -1.61875985e-02,
+                4.84112370e+00,
+            ],
+            RTDCorrection::HONEYWELL => [
+                3.00981635e-15,
+                -7.16025438e-12,
+                -3.91897352e-09,
+                2.46895963e-05,
+                -2.40253053e-02,
+                7.40520839e+00,
+            ],
+        }
+    }
 }
 type Polynomial = [f32; 6];
 
@@ -76,37 +82,34 @@ pub struct Coefficients {
     a: f32,
     b: f32,
     c: f32,
-    correction_poly: [f32; 6],
 }
 
 impl Coefficients {
     /// From: https://prod-edam.honeywell.com/content/dam/honeywell-edam/sps/siot/en-us/products/sensors/temperature-sensors/rtd-sensors/hrts-series/documents/sps-siot-hrts-series-thin-film-platinum-rtds-datasheet-009081-1-en-ciid-154815.pdf#page=3
-    pub const HONEYWELL: Self = Self {
+    // For Honeywell HRTS PT1000, the temperature coefficient of resistence (TCR) is 3750 ppm/°C, which results in different A,B,C coefficients.
+    pub const TCR_3750: Self = Self {
         a: 3.81e-3,
         b: -6.02e-7,
         c: -6.0e-12,
-        correction_poly: RTDCorrection::HONEYWELL,
     };
 
-    pub const ITS90: Self = Self {
+    // Most common type of RTD, with a TCR of 3850 ppm/°C. This is the default for PT100 and PT1000.
+    pub const TCR_3850: Self = Self {
         a: 3.9083e-3,
         b: -5.7750e-7,
         c: -4.1830e-12,
-        correction_poly: RTDCorrection::PT1000,
-    };
-
-    pub const IPTS69: Self = Self {
-        a: 3.90802e-03,
-        b: -5.80195e-07,
-        c: -4.27350e-12,
-        correction_poly: RTDCorrection::PT100,
     };
 }
 
 /// Calculate temperature of RTD from resistance value.
 ///
 /// Allowed temperature range: -200–850°C.
-pub fn calc_t(r: f32, r_0: RTDType, c: Coefficients) -> Result<f32, Error> {
+pub fn calc_t(
+    r: f32,
+    r_0: RTDType,
+    c: Coefficients,
+    correction_poly: RTDCorrection,
+) -> Result<f32, Error> {
     let r_min = floorf(calc_r(-200_f32, r_0, c)?) as i32;
     let r_max = floorf(calc_r(850_f32, r_0, c)?) as i32;
 
@@ -119,7 +122,7 @@ pub fn calc_t(r: f32, r_0: RTDType, c: Coefficients) -> Result<f32, Error> {
     match (floorf(r) as i32, r_0 as i32) {
         (r, r_0) if r_0 <= r && r <= r_max => Ok(t), // t >= 0°C
         (r, r_0) if r_min <= r && r < r_0 => Ok(
-            t + poly_correction(r as f32, c.correction_poly), // t < 0°C, apply the correctional polynomial
+            t + poly_correction(r as f32, correction_poly.get_poly()), // t < 0°C, apply the correctional polynomial
         ),
         _ => Err(Error::OutOfBounds),
     }
@@ -172,7 +175,7 @@ mod tests {
     fn resistance_calculation() {
         let t = 0.0;
 
-        let r = calc_r(t, RTDType::PT100, Coefficients::ITS90).unwrap();
+        let r = calc_r(t, RTDType::PT100, Coefficients::TCR_3850).unwrap();
         assert_eq!(r, 100_f32);
     }
 
@@ -180,7 +183,13 @@ mod tests {
     fn temperature_calculation() {
         let r = 100.0;
 
-        let t = calc_t(r, RTDType::PT100, Coefficients::ITS90).unwrap();
+        let t = calc_t(
+            r,
+            RTDType::PT100,
+            Coefficients::TCR_3850,
+            RTDCorrection::PT100,
+        )
+        .unwrap();
         assert_eq!(t, 0_f32);
     }
 
@@ -188,24 +197,48 @@ mod tests {
     fn negative_temperature() {
         let r = 99.0;
 
-        let t = calc_t(r, RTDType::PT100, Coefficients::ITS90).unwrap();
+        let t = calc_t(
+            r,
+            RTDType::PT100,
+            Coefficients::TCR_3850,
+            RTDCorrection::PT100,
+        )
+        .unwrap();
         dbg!(t);
         assert!(t < 0_f32);
     }
 
     #[test]
     fn test_range_for_all_types() {
-        test_range(18, 390, RTDType::PT100, Coefficients::ITS90);
+        test_range(
+            18,
+            390,
+            RTDType::PT100,
+            Coefficients::TCR_3850,
+            RTDCorrection::PT100,
+        );
         // FIXME: Add tests for PT200 + PT500 once their polynomials are added
-        test_range(185, 3904, RTDType::PT1000, Coefficients::ITS90);
+        test_range(
+            185,
+            3904,
+            RTDType::PT1000,
+            Coefficients::TCR_3850,
+            RTDCorrection::PT1000,
+        );
     }
 
-    fn test_range(r_min: i32, r_max: i32, rtd_type: RTDType, c: Coefficients) {
+    fn test_range(
+        r_min: i32,
+        r_max: i32,
+        rtd_type: RTDType,
+        c: Coefficients,
+        correction_poly: RTDCorrection,
+    ) {
         // Calculate the first result
-        let mut prev_result = calc_t(r_min as f32, rtd_type, c).unwrap();
+        let mut prev_result = calc_t(r_min as f32, rtd_type, c, correction_poly).unwrap();
 
         for r in r_min + 1..r_max + 1 {
-            let res = calc_t(r as f32, rtd_type, c).unwrap();
+            let res = calc_t(r as f32, rtd_type, c, correction_poly).unwrap();
             println!("{}, {}, {}", r, res, prev_result);
 
             // Result needs to be larger than the previous result
@@ -221,9 +254,21 @@ mod tests {
     #[test]
     // roughly -70 and 260 C
     fn test_high_low() {
-        let t_high = calc_t(2050.0, RTDType::PT1000, Coefficients::HONEYWELL).unwrap();
+        let t_high = calc_t(
+            2050.0,
+            RTDType::PT1000,
+            Coefficients::TCR_3750,
+            RTDCorrection::HONEYWELL,
+        )
+        .unwrap();
         println!("{t_high}");
-        let t_low = calc_t(750.0, RTDType::PT1000, Coefficients::HONEYWELL).unwrap();
+        let t_low = calc_t(
+            750.0,
+            RTDType::PT1000,
+            Coefficients::TCR_3750,
+            RTDCorrection::HONEYWELL,
+        )
+        .unwrap();
         println!("{t_low}");
     }
 }
